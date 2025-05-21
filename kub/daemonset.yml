@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: log-agent
+spec:
+  selector:
+    matchLabels:
+      app: log-agent
+  template:
+    metadata:
+      labels:
+        app: log-agent
+    spec:
+      containers:
+      - name: log-agent
+        image: curlimages/curl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          while true; do
+            echo "Collecting logs at $(date)"
+            curl -s http://app-service/logs >> /collected-logs/aggregated.log
+            echo "---- End of collection cycle ----" >> /collected-logs/aggregated.log
+            sleep 60
+          done
+        volumeMounts:
+        - name: collected-logs
+          mountPath: /collected-logs
+      volumes:
+      - name: collected-logs
+        emptyDir: {}

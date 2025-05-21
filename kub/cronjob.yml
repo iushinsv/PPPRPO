@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: log-archiver
+spec:
+  schedule: "*/10 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: log-archiver
+            image: curlimages/curl:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /tmp/logs
+              timestamp=$(date +%Y%m%d-%H%M%S)
+              curl -s http://app-service/logs > /tmp/logs/app.log
+              tar -czf /archive/app-logs-${timestamp}.tar.gz /tmp/logs
+              echo "Logs archived at /archive/app-logs-${timestamp}.tar.gz"
+            volumeMounts:
+            - name: tmp-volume
+              mountPath: /tmp
+            - name: archive-volume
+              mountPath: /archive
+          volumes:
+          - name: tmp-volume
+            emptyDir: {}
+          - name: archive-volume
+            persistentVolumeClaim:
+              claimName: log-archive-pvc
+          restartPolicy: OnFailure

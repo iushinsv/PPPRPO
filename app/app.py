@@ -1,8 +1,8 @@
 import os
-from fastapi import FastAPI, Request, status
-from fastapi.responses import JSONResponse, PlainTextResponse
 import logging
-from pathlib import Path
+from time import time
+from fastapi import FastAPI, Request, Response, status, BackgroundTasks
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 app = FastAPI()
 
@@ -10,11 +10,6 @@ LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
 PORT = int(os.environ.get('PORT', 5000))
 WELCOME_MESSAGE = os.environ.get('WELCOME_MESSAGE', 'Welcome to the custom app')
 
-# Создаем директорию для логов
-log_dir = Path('/app/logs')
-log_dir.mkdir(parents=True, exist_ok=True)
-
-# Настройка логирования
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -25,59 +20,74 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-@app.get("/", response_class=PlainTextResponse)
-def welcome():
-    """Эндпоинт приветствия"""
+# Prometheus metrics
+REQUEST_COUNT = Counter(
+    'flask_app_requests_total', 
+    'Total App HTTP Requests', 
+    ['method', 'endpoint', 'http_status']
+)
+REQUEST_LATENCY = Histogram(
+    'flask_app_request_latency_seconds',
+    'Flask Request latency',
+    ['endpoint']
+)
+
+@app.middleware("http")
+async def monitor_requests(request: Request, call_next):
+    start_time = time()
+    method = request.method
+    endpoint = request.url.path
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        response = Response(str(e), status_code=500)
+    latency = time() - start_time
+    
+    REQUEST_COUNT.labels(method, endpoint, response.status_code).inc()
+    REQUEST_LATENCY.labels(endpoint).observe(latency)
+    return response
+
+@app.get("/")
+async def welcome():
     logger.info("Welcome endpoint called")
     return WELCOME_MESSAGE
 
 @app.get("/status")
-def get_status():
-    """Проверка статуса сервиса"""
+async def get_status():
     logger.info("Status endpoint called")
     return {"status": "ok"}
 
-@app.post("/logs")
-async def add_log(request: Request):
-    """Добавление записи в лог"""
-    # Проверка формата запроса
-    if not request.headers.get('Content-Type', '').startswith('application/json'):
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Request must be JSON"}
-        )
-    
-    # Парсинг JSON
-    try:
-        data = await request.json()
-    except Exception:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"error": "Invalid JSON"}
-        )
-    
-    # Запись сообщения
+@app.post("/log")
+async def log_message(data: dict, background_tasks: BackgroundTasks):
     message = data.get('message', '')
     logger.info(f"Received log message: {message}")
     
-    with open('/app/logs/app.log', 'a') as f:
-        f.write(f"{message}\n")
-    
+    background_tasks.add_task(
+        lambda: write_log_message(message)
+    )
     return {"status": "logged"}
 
-@app.get("/logs", response_class=PlainTextResponse)
-def get_logs():
-    """Получение логов"""
+def write_log_message(message: str):
+    with open('/app/logs/app.log', 'a') as f:
+        f.write(f"{message}\n")
+
+@app.get("/logs")
+async def get_logs():
     logger.info("Logs endpoint called")
     try:
         with open('/app/logs/app.log', 'r') as f:
-            return f.read()
+            logs = f.read()
+        return Response(content=logs, media_type="text/plain")
     except Exception as e:
         logger.error(f"Error reading logs: {e}")
-        return JSONResponse(
-            content={"error": str(e)},
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        return {"error": str(e)}, status.HTTP_500_INTERNAL_SERVER_ERROR
+
+@app.get("/metrics")
+async def metrics():
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
 
 if __name__ == "__main__":
     import uvicorn
